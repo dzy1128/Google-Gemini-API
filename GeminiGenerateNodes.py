@@ -103,9 +103,6 @@ class GeminiGenerate:
     def generate(self, prompt, image1, image2=None, image3=None, model_name="gemini-2.5-flash-image-preview"):
         # 构造 contents: [prompt, image1, (image2?), (image3?)]
         contents = [str(prompt)]
-        
-        print(f"[Gemini Debug] Starting generation with prompt: {prompt[:100]}...")
-        print(f"[Gemini Debug] Model: {model_name}")
 
         try:
             pil1 = _comfy_image_to_pil(image1)
@@ -114,23 +111,17 @@ class GeminiGenerate:
                 contents.append(_comfy_image_to_pil(image2))
             if image3 is not None:
                 contents.append(_comfy_image_to_pil(image3))
-            print(f"[Gemini Debug] Successfully converted {len(contents)-1} images")
         except Exception as e:
             # 转换失败，直接返回错误文本和原图
-            print(f"[Gemini Debug] Image conversion failed: {e}")
             return image1, f"[Gemini Node] Failed to convert input images: {e}", False
 
         try:
-            print("[Gemini Debug] Getting client...")
             client = self._get_client()
-            print("[Gemini Debug] Client created, making API call...")
             resp = client.models.generate_content(
                 model=model_name,
                 contents=contents,
             )
-            print(f"[Gemini Debug] API call successful, response type: {type(resp)}")
         except Exception as e:
-            print(f"[Gemini Debug] API call failed: {e}")
             return image1, f"[Gemini Node] API call failed: {e}", False
 
         texts = []
@@ -138,41 +129,27 @@ class GeminiGenerate:
         image_generated = False
 
         try:
-            print("[Gemini Debug] Parsing response...")
             candidates = getattr(resp, "candidates", None)
-            print(f"[Gemini Debug] Found {len(candidates) if candidates else 0} candidates")
             if candidates:
                 parts = candidates[0].content.parts
-                print(f"[Gemini Debug] Found {len(parts)} parts in first candidate")
-                for i, part in enumerate(parts):
-                    print(f"[Gemini Debug] Part {i}: has text={hasattr(part, 'text')}, has inline_data={hasattr(part, 'inline_data')}")
+                for part in parts:
                     if getattr(part, "text", None):
                         texts.append(part.text)
-                        print(f"[Gemini Debug] Added text: {part.text[:100]}...")
                     elif getattr(part, "inline_data", None) is not None and getattr(part.inline_data, "data", None) is not None:
                         try:
-                            print("[Gemini Debug] Found inline image data, converting...")
                             pil = Image.open(BytesIO(part.inline_data.data))
                             out_tensor = _pil_to_comfy_image(pil)
                             image_generated = True
-                            print("[Gemini Debug] Successfully converted generated image")
-                        except Exception as img_e:
-                            print(f"[Gemini Debug] Failed to convert generated image: {img_e}")
+                        except Exception:
                             pass
         except Exception as e:
-            print(f"[Gemini Debug] Failed to parse response: {e}")
             texts.append(f"[Gemini Node] Failed to parse response: {e}")
 
         if out_tensor is None:
-            print("[Gemini Debug] No generated image found, returning original image")
             out_tensor = image1  # 未生成图片则回传输入的第1张
             image_generated = False
-        else:
-            print("[Gemini Debug] Returning generated image")
 
         text_out = "\n".join([t for t in texts if t])
-        print(f"[Gemini Debug] Final text output: {text_out[:100] if text_out else 'No text'}")
-        print(f"[Gemini Debug] Image generated: {image_generated}")
         return out_tensor, text_out, image_generated
 
 
