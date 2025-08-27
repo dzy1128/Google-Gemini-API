@@ -14,7 +14,7 @@ ComfyUI Custom Node: Gemini Generate Content (3-Image)
 
 依赖:
 - pip install google-genai Pillow numpy torch
-- 需配置 GOOGLE_API_KEY 环境变量，或通过节点的 api_key 输入传入。
+- 需配置 GOOGLE_API_KEY 环境变量。
 
 安装:
 - 将本文件放入 ComfyUI/custom_nodes/ 目录下，重启 ComfyUI。
@@ -68,7 +68,7 @@ def _pil_to_comfy_image(pil_img):
     return tensor
 
 
-class GeminiGenerateContent3Image:
+class GeminiGenerate:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -83,7 +83,6 @@ class GeminiGenerateContent3Image:
                 "image2": ("IMAGE", {}),  # 可选
                 "image3": ("IMAGE", {}),  # 可选
                 "model_name": ("STRING", {"default": "gemini-2.5-flash-image-preview"}),
-                "api_key": ("STRING", {"default": ""}),
             }
         }
 
@@ -93,16 +92,15 @@ class GeminiGenerateContent3Image:
     CATEGORY = "Google/GenAI"
     OUTPUT_NODE = False
 
-    def _get_client(self, api_key: str):
+    def _get_client(self):
         if genai is None:
             raise RuntimeError("google-genai SDK not installed. Please run: pip install google-genai")
-        key = (api_key or os.getenv("GOOGLE_API_KEY") or "").strip()
+        key = os.getenv("GOOGLE_API_KEY", "").strip()
         if not key:
-            # 若未提供 api_key，则尝试使用默认配置创建客户端
-            return genai.Client()
+            raise RuntimeError("GOOGLE_API_KEY environment variable is required but not set")
         return genai.Client(api_key=key)
 
-    def generate(self, prompt, image1, image2=None, image3=None, model_name="gemini-2.5-flash-image-preview", api_key=""):
+    def generate(self, prompt, image1, image2=None, image3=None, model_name="gemini-2.5-flash-image-preview"):
         # 构造 contents: [prompt, image1, (image2?), (image3?)]
         contents = [str(prompt)]
 
@@ -118,7 +116,7 @@ class GeminiGenerateContent3Image:
             return image1, f"[Gemini Node] Failed to convert input images: {e}", False
 
         try:
-            client = self._get_client(api_key)
+            client = self._get_client()
             resp = client.models.generate_content(
                 model=model_name,
                 contents=contents,
@@ -156,10 +154,10 @@ class GeminiGenerateContent3Image:
 
 
 NODE_CLASS_MAPPINGS = {
-    "GeminiGenerateContent3Image": GeminiGenerateContent3Image,
+    "GeminiGenerate": GeminiGenerate,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "GeminiGenerateContent3Image": "Gemini Generate",
+    "GeminiGenerate": "Gemini Generate",
 }
 
