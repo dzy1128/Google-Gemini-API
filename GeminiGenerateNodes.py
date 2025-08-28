@@ -80,8 +80,8 @@ class GeminiGenerate:
                 "image1": ("IMAGE", {}),  # 必填
                 "seed": ("INT", {
                     "default": 0,
-                    "min": -9223372036854775808,  # 64位有符号整数最小值
-                    "max": 9223372036854775807,   # 64位有符号整数最大值
+                    "min": 0,  # 64位有符号整数最小值
+                    "max": 0xffffffffffffffff,   # 64位有符号整数最大值
                     "step": 1
                 }),
             },
