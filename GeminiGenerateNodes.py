@@ -89,6 +89,12 @@ class GeminiGenerate:
                 "image2": ("IMAGE", {}),  # 可选
                 "image3": ("IMAGE", {}),  # 可选
                 "model_name": ("STRING", {"default": "gemini-2.5-flash-image-preview"}),
+                "max_retries": ("INT", {
+                    "default": 2,
+                    "min": 0,
+                    "max": 5,
+                    "step": 1
+                }),
             }
         }
 
@@ -108,7 +114,7 @@ class GeminiGenerate:
         # 环境变量会自动被SDK使用
         return genai.Client()
 
-    def generate(self, prompt, image1, seed, image2=None, image3=None, model_name="gemini-2.5-flash-image-preview"):
+    def generate(self, prompt, image1, seed, image2=None, image3=None, model_name="gemini-2.5-flash-image-preview", max_retries=2):
         # 构造 contents: [prompt, image1, (image2?), (image3?)]
         # seed 参数只用于 ComfyUI 节点，不传递给 Gemini API
         contents = [str(prompt)]
@@ -124,18 +130,62 @@ class GeminiGenerate:
             # 转换失败，直接返回错误文本和原图
             return image1, f"[Gemini Node] Failed to convert input images: {e}", False
 
-        try:
-            print(f"[DEBUG] Creating client...")
-            client = self._get_client()
-            print(f"[DEBUG] Making API call with {len(contents)} contents: 1 prompt + {len(contents)-1} images")
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-            )
-            print(f"[DEBUG] API call successful")
-        except Exception as e:
-            print(f"[DEBUG] API call failed: {e}")
-            return image1, f"[Gemini Node] API call failed: {e}", False
+        # API 调用重试逻辑
+        client = None
+        resp = None
+        last_error = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                if client is None:
+                    print(f"[DEBUG] Creating client...")
+                    client = self._get_client()
+                
+                print(f"[DEBUG] API call attempt {attempt + 1}/{max_retries + 1} with {len(contents)} contents: 1 prompt + {len(contents)-1} images")
+                resp = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                )
+                print(f"[DEBUG] API call successful on attempt {attempt + 1}")
+                break  # 成功，退出重试循环
+                
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                print(f"[DEBUG] API call attempt {attempt + 1} failed: {e}")
+                
+                # 对于某些错误，不进行重试
+                if ("400" in error_str or "FAILED_PRECONDITION" in error_str or 
+                    "User location is not supported" in error_str or
+                    "RESOURCE_EXHAUSTED" in error_str):
+                    print(f"[DEBUG] Non-retryable error, stopping retries")
+                    break
+                
+                # 对于可重试的错误（如 500），等待后重试
+                if attempt < max_retries:
+                    import time
+                    wait_time = (attempt + 1) * 2  # 递增等待时间：2秒, 4秒, 6秒...
+                    print(f"[DEBUG] Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+        
+        # 处理最终失败的情况
+        if resp is None:
+            error_str = str(last_error)
+            print(f"[DEBUG] All API call attempts failed. Last error: {last_error}")
+            
+            # 检查具体的错误类型并提供相应的建议
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                return image1, f"[Gemini Node] API配额已用完，请稍后重试或升级计划。", False
+            elif "400" in error_str and "User location is not supported" in error_str:
+                return image1, f"[Gemini Node] 地理位置限制：你所在的地区不支持使用 Gemini API。请检查代理设置。", False
+            elif "500" in error_str or "INTERNAL" in error_str:
+                return image1, f"[Gemini Node] Google 服务器内部错误 (500)，已重试 {max_retries} 次仍失败，请稍后再试。", False
+            elif "503" in error_str or "SERVICE_UNAVAILABLE" in error_str:
+                return image1, f"[Gemini Node] 服务暂时不可用 (503)，已重试 {max_retries} 次仍失败，请稍后再试。", False
+            elif "FAILED_PRECONDITION" in error_str:
+                return image1, f"[Gemini Node] API 使用条件不满足，可能是地理位置限制或其他条件问题。", False
+            else:
+                return image1, f"[Gemini Node] API call failed after {max_retries + 1} attempts: {last_error}", False
 
         texts = []
         out_tensor = None
