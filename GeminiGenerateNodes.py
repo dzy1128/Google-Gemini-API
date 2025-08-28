@@ -98,7 +98,9 @@ class GeminiGenerate:
         key = os.getenv("GOOGLE_API_KEY", "").strip()
         if not key:
             raise RuntimeError("GOOGLE_API_KEY environment variable is required but not set")
-        return genai.Client(api_key=key)
+        # 按照官方示例使用默认客户端创建方式
+        # 环境变量会自动被SDK使用
+        return genai.Client()
 
     def generate(self, prompt, image1, image2=None, image3=None, model_name="gemini-2.5-flash-image-preview"):
         # 构造 contents: [prompt, image1, (image2?), (image3?)]
@@ -116,12 +118,16 @@ class GeminiGenerate:
             return image1, f"[Gemini Node] Failed to convert input images: {e}", False
 
         try:
+            print(f"[DEBUG] Creating client...")
             client = self._get_client()
+            print(f"[DEBUG] Making API call with {len(contents)} contents: 1 prompt + {len(contents)-1} images")
             resp = client.models.generate_content(
                 model=model_name,
                 contents=contents,
             )
+            print(f"[DEBUG] API call successful")
         except Exception as e:
+            print(f"[DEBUG] API call failed: {e}")
             return image1, f"[Gemini Node] API call failed: {e}", False
 
         texts = []
@@ -129,20 +135,29 @@ class GeminiGenerate:
         image_generated = False
 
         try:
-            candidates = getattr(resp, "candidates", None)
-            if candidates:
-                parts = candidates[0].content.parts
-                for part in parts:
-                    if getattr(part, "text", None):
-                        texts.append(part.text)
-                    elif getattr(part, "inline_data", None) is not None and getattr(part.inline_data, "data", None) is not None:
-                        try:
-                            pil = Image.open(BytesIO(part.inline_data.data))
-                            out_tensor = _pil_to_comfy_image(pil)
-                            image_generated = True
-                        except Exception:
-                            pass
+            # 完全按照官方示例的方式解析响应
+            print(f"[DEBUG] Parsing response with {len(resp.candidates)} candidates")
+            parts = resp.candidates[0].content.parts
+            print(f"[DEBUG] Found {len(parts)} parts in response")
+            
+            for i, part in enumerate(parts):
+                print(f"[DEBUG] Part {i}: text={part.text is not None}, inline_data={part.inline_data is not None}")
+                if part.text is not None:
+                    texts.append(part.text)
+                    print(f"[DEBUG] Added text: {part.text[:100]}...")
+                elif part.inline_data is not None:
+                    try:
+                        print(f"[DEBUG] Processing generated image data...")
+                        pil = Image.open(BytesIO(part.inline_data.data))
+                        print(f"[DEBUG] Generated image size: {pil.size}")
+                        out_tensor = _pil_to_comfy_image(pil)
+                        image_generated = True
+                        print(f"[DEBUG] Successfully converted generated image to tensor")
+                    except Exception as img_e:
+                        print(f"[DEBUG] Failed to process generated image: {img_e}")
+                        texts.append(f"[Gemini Node] Failed to process generated image: {img_e}")
         except Exception as e:
+            print(f"[DEBUG] Failed to parse response: {e}")
             texts.append(f"[Gemini Node] Failed to parse response: {e}")
 
         if out_tensor is None:
@@ -150,6 +165,7 @@ class GeminiGenerate:
             image_generated = False
 
         text_out = "\n".join([t for t in texts if t])
+        print(f"[DEBUG] Final result: image_generated={image_generated}, text_length={len(text_out)}")
         return out_tensor, text_out, image_generated
 
 
