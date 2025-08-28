@@ -78,6 +78,12 @@ class GeminiGenerate:
                     "default": "Generate an image of a cute cat eating a nano-banana in a fancy restaurant under the gemini constellation. Create the image, don't just describe it."
                 }),
                 "image1": ("IMAGE", {}),  # 必填
+                "seed": ("INT", {
+                    "default": 0,
+                    "min": -9223372036854775808,  # 64位有符号整数最小值
+                    "max": 9223372036854775807,   # 64位有符号整数最大值
+                    "step": 1
+                }),
             },
             "optional": {
                 "image2": ("IMAGE", {}),  # 可选
@@ -102,8 +108,9 @@ class GeminiGenerate:
         # 环境变量会自动被SDK使用
         return genai.Client()
 
-    def generate(self, prompt, image1, image2=None, image3=None, model_name="gemini-2.5-flash-image-preview"):
+    def generate(self, prompt, image1, seed, image2=None, image3=None, model_name="gemini-2.5-flash-image-preview"):
         # 构造 contents: [prompt, image1, (image2?), (image3?)]
+        # seed 参数只用于 ComfyUI 节点，不传递给 Gemini API
         contents = [str(prompt)]
 
         try:
