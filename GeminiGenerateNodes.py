@@ -192,34 +192,65 @@ class GeminiGenerate:
         image_generated = False
 
         try:
-            # 完全按照官方示例的方式解析响应
-            print(f"[DEBUG] Parsing response with {len(resp.candidates)} candidates")
-            parts = resp.candidates[0].content.parts
-            print(f"[DEBUG] Found {len(parts)} parts in response")
+            # 安全地解析响应
+            print(f"[DEBUG] Parsing response...")
             
-            for i, part in enumerate(parts):
-                print(f"[DEBUG] Part {i}: text={part.text is not None}, inline_data={part.inline_data is not None}")
-                if part.text is not None:
-                    texts.append(part.text)
-                    print(f"[DEBUG] Added text: {part.text[:200]}...")
-                    # 检查文本是否包含拒绝生成图像的信息
-                    if any(keyword in part.text.lower() for keyword in ['cannot generate', 'cannot create', 'unable to generate', 'unable to create']):
-                        print(f"[DEBUG] Model refused to generate image")
+            # 检查响应结构
+            if not hasattr(resp, 'candidates') or not resp.candidates:
+                print(f"[DEBUG] No candidates in response")
+                texts.append("[Gemini Node] API 返回空响应，没有生成内容")
+            else:
+                print(f"[DEBUG] Found {len(resp.candidates)} candidates")
+                
+                candidate = resp.candidates[0]
+                print(f"[DEBUG] First candidate: {candidate}")
+                
+                # 检查 content 是否存在
+                if not hasattr(candidate, 'content') or candidate.content is None:
+                    print(f"[DEBUG] Candidate has no content")
+                    texts.append("[Gemini Node] API 响应中没有内容数据")
+                else:
+                    content = candidate.content
+                    print(f"[DEBUG] Content found: {content}")
+                    
+                    # 检查 parts 是否存在
+                    if not hasattr(content, 'parts') or not content.parts:
+                        print(f"[DEBUG] Content has no parts")
+                        texts.append("[Gemini Node] API 响应内容为空")
                     else:
-                        print(f"[DEBUG] Model returned text instead of image")
-                elif part.inline_data is not None:
-                    try:
-                        print(f"[DEBUG] Processing generated image data...")
-                        pil = Image.open(BytesIO(part.inline_data.data))
-                        print(f"[DEBUG] Generated image size: {pil.size}")
-                        out_tensor = _pil_to_comfy_image(pil)
-                        image_generated = True
-                        print(f"[DEBUG] Successfully converted generated image to tensor")
-                    except Exception as img_e:
-                        print(f"[DEBUG] Failed to process generated image: {img_e}")
-                        texts.append(f"[Gemini Node] Failed to process generated image: {img_e}")
+                        parts = content.parts
+                        print(f"[DEBUG] Found {len(parts)} parts in response")
+                        
+                        for i, part in enumerate(parts):
+                            print(f"[DEBUG] Part {i}: {part}")
+                            print(f"[DEBUG] Part {i}: text={part.text is not None}, inline_data={part.inline_data is not None}")
+                            
+                            if part.text is not None:
+                                texts.append(part.text)
+                                print(f"[DEBUG] Added text: {part.text[:200]}...")
+                                # 检查文本是否包含拒绝生成图像的信息
+                                if any(keyword in part.text.lower() for keyword in ['cannot generate', 'cannot create', 'unable to generate', 'unable to create']):
+                                    print(f"[DEBUG] Model refused to generate image")
+                                else:
+                                    print(f"[DEBUG] Model returned text instead of image")
+                            elif part.inline_data is not None:
+                                try:
+                                    print(f"[DEBUG] Processing generated image data...")
+                                    pil = Image.open(BytesIO(part.inline_data.data))
+                                    print(f"[DEBUG] Generated image size: {pil.size}")
+                                    out_tensor = _pil_to_comfy_image(pil)
+                                    image_generated = True
+                                    print(f"[DEBUG] Successfully converted generated image to tensor")
+                                except Exception as img_e:
+                                    print(f"[DEBUG] Failed to process generated image: {img_e}")
+                                    texts.append(f"[Gemini Node] Failed to process generated image: {img_e}")
+                            else:
+                                print(f"[DEBUG] Part {i} contains neither text nor image data")
+                
         except Exception as e:
             print(f"[DEBUG] Failed to parse response: {e}")
+            import traceback
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
             texts.append(f"[Gemini Node] Failed to parse response: {e}")
 
         if out_tensor is None:
