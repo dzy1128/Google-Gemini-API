@@ -138,46 +138,42 @@ class GeminiGenerate:
         for attempt in range(max_retries + 1):
             try:
                 if client is None:
-                    print(f"[DEBUG] Creating client...")
                     client = self._get_client()
                 
-                print(f"[DEBUG] API call attempt {attempt + 1}/{max_retries + 1} with {len(contents)} contents: 1 prompt + {len(contents)-1} images")
                 resp = client.models.generate_content(
                     model=model_name,
                     contents=contents,
                 )
-                print(f"[DEBUG] API call successful on attempt {attempt + 1}")
                 break  # 成功，退出重试循环
                 
             except Exception as e:
                 last_error = e
                 error_str = str(e)
-                print(f"[DEBUG] API call attempt {attempt + 1} failed: {e}")
                 
                 # 对于某些错误，不进行重试
                 if ("400" in error_str or "FAILED_PRECONDITION" in error_str or 
                     "User location is not supported" in error_str or
-                    "RESOURCE_EXHAUSTED" in error_str):
-                    print(f"[DEBUG] Non-retryable error, stopping retries")
+                    "RESOURCE_EXHAUSTED" in error_str or
+                    "PROHIBITED_CONTENT" in error_str):
                     break
                 
                 # 对于可重试的错误（如 500），等待后重试
                 if attempt < max_retries:
                     import time
                     wait_time = (attempt + 1) * 2  # 递增等待时间：2秒, 4秒, 6秒...
-                    print(f"[DEBUG] Waiting {wait_time} seconds before retry...")
                     time.sleep(wait_time)
         
         # 处理最终失败的情况
         if resp is None:
             error_str = str(last_error)
-            print(f"[DEBUG] All API call attempts failed. Last error: {last_error}")
             
             # 检查具体的错误类型并提供相应的建议
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
                 return image1, f"[Gemini Node] API配额已用完，请稍后重试或升级计划。", False
             elif "400" in error_str and "User location is not supported" in error_str:
                 return image1, f"[Gemini Node] 地理位置限制：你所在的地区不支持使用 Gemini API。请检查代理设置。", False
+            elif "PROHIBITED_CONTENT" in error_str:
+                return image1, f"[Gemini Node] 内容被拒绝：模型认为请求包含禁止的内容。请尝试修改提示词或图像。", False
             elif "500" in error_str or "INTERNAL" in error_str:
                 return image1, f"[Gemini Node] Google 服务器内部错误 (500)，已重试 {max_retries} 次仍失败，请稍后再试。", False
             elif "503" in error_str or "SERVICE_UNAVAILABLE" in error_str:
@@ -193,64 +189,52 @@ class GeminiGenerate:
 
         try:
             # 安全地解析响应
-            print(f"[DEBUG] Parsing response...")
-            
             # 检查响应结构
             if not hasattr(resp, 'candidates') or not resp.candidates:
-                print(f"[DEBUG] No candidates in response")
                 texts.append("[Gemini Node] API 返回空响应，没有生成内容")
             else:
-                print(f"[DEBUG] Found {len(resp.candidates)} candidates")
-                
                 candidate = resp.candidates[0]
-                print(f"[DEBUG] First candidate: {candidate}")
+                
+                # 检查是否有 finish_reason，这能告诉我们为什么没有内容
+                if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
+                    finish_reason = str(candidate.finish_reason)
+                    
+                    if 'PROHIBITED_CONTENT' in finish_reason:
+                        texts.append("[Gemini Node] 内容被拒绝：模型认为请求包含禁止的内容。请尝试修改提示词或图像。")
+                    elif 'SAFETY' in finish_reason:
+                        texts.append("[Gemini Node] 安全检查失败：请求触发了安全过滤器。请尝试使用更安全的内容。")
+                    elif 'MAX_TOKENS' in finish_reason:
+                        texts.append("[Gemini Node] 达到最大 token 限制，响应被截断。")
+                    elif 'STOP' in finish_reason:
+                        pass  # 正常完成，继续处理内容
+                    else:
+                        texts.append(f"[Gemini Node] 生成因未知原因停止：{finish_reason}")
                 
                 # 检查 content 是否存在
                 if not hasattr(candidate, 'content') or candidate.content is None:
-                    print(f"[DEBUG] Candidate has no content")
-                    texts.append("[Gemini Node] API 响应中没有内容数据")
+                    if not texts:  # 如果还没有添加错误信息
+                        texts.append("[Gemini Node] API 响应中没有内容数据")
                 else:
                     content = candidate.content
-                    print(f"[DEBUG] Content found: {content}")
                     
                     # 检查 parts 是否存在
                     if not hasattr(content, 'parts') or not content.parts:
-                        print(f"[DEBUG] Content has no parts")
                         texts.append("[Gemini Node] API 响应内容为空")
                     else:
                         parts = content.parts
-                        print(f"[DEBUG] Found {len(parts)} parts in response")
                         
-                        for i, part in enumerate(parts):
-                            print(f"[DEBUG] Part {i}: {part}")
-                            print(f"[DEBUG] Part {i}: text={part.text is not None}, inline_data={part.inline_data is not None}")
-                            
+                        for part in parts:
                             if part.text is not None:
                                 texts.append(part.text)
-                                print(f"[DEBUG] Added text: {part.text[:200]}...")
-                                # 检查文本是否包含拒绝生成图像的信息
-                                if any(keyword in part.text.lower() for keyword in ['cannot generate', 'cannot create', 'unable to generate', 'unable to create']):
-                                    print(f"[DEBUG] Model refused to generate image")
-                                else:
-                                    print(f"[DEBUG] Model returned text instead of image")
                             elif part.inline_data is not None:
                                 try:
-                                    print(f"[DEBUG] Processing generated image data...")
                                     pil = Image.open(BytesIO(part.inline_data.data))
-                                    print(f"[DEBUG] Generated image size: {pil.size}")
                                     out_tensor = _pil_to_comfy_image(pil)
                                     image_generated = True
-                                    print(f"[DEBUG] Successfully converted generated image to tensor")
                                 except Exception as img_e:
-                                    print(f"[DEBUG] Failed to process generated image: {img_e}")
                                     texts.append(f"[Gemini Node] Failed to process generated image: {img_e}")
-                            else:
-                                print(f"[DEBUG] Part {i} contains neither text nor image data")
                 
         except Exception as e:
-            print(f"[DEBUG] Failed to parse response: {e}")
-            import traceback
-            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
             texts.append(f"[Gemini Node] Failed to parse response: {e}")
 
         if out_tensor is None:
@@ -258,7 +242,6 @@ class GeminiGenerate:
             image_generated = False
 
         text_out = "\n".join([t for t in texts if t])
-        print(f"[DEBUG] Final result: image_generated={image_generated}, text_length={len(text_out)}")
         return out_tensor, text_out, image_generated
 
 
