@@ -75,7 +75,7 @@ class GeminiGenerate:
             "required": {
                 "prompt": ("STRING", {
                     "multiline": True,
-                    "default": "Create a picture of my cat eating a nano-banana in a fancy restaurant under the gemini constellation"
+                    "default": "Generate an image of a cute cat eating a nano-banana in a fancy restaurant under the gemini constellation. Create the image, don't just describe it."
                 }),
                 "image1": ("IMAGE", {}),  # 必填
             },
@@ -144,7 +144,12 @@ class GeminiGenerate:
                 print(f"[DEBUG] Part {i}: text={part.text is not None}, inline_data={part.inline_data is not None}")
                 if part.text is not None:
                     texts.append(part.text)
-                    print(f"[DEBUG] Added text: {part.text[:100]}...")
+                    print(f"[DEBUG] Added text: {part.text[:200]}...")
+                    # 检查文本是否包含拒绝生成图像的信息
+                    if any(keyword in part.text.lower() for keyword in ['cannot generate', 'cannot create', 'unable to generate', 'unable to create']):
+                        print(f"[DEBUG] Model refused to generate image")
+                    else:
+                        print(f"[DEBUG] Model returned text instead of image")
                 elif part.inline_data is not None:
                     try:
                         print(f"[DEBUG] Processing generated image data...")
