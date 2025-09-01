@@ -1,23 +1,29 @@
 
 # -*- coding: utf-8 -*-
 """
-ComfyUI Custom Node: Gemini Generate Content (3-Image) - Multi-Image Output
+ComfyUI Custom Node: Gemini Generate Content (3-Image) - Multi-Candidate Output
 
 功能:
 - 接收 1~3 张图片（第1张必需，另外2张可选），和一个文本 prompt。
 - 调用 Google AI 的 genai SDK（与用户示例一致: from google import genai），
   使用模型 "gemini-2.5-flash-image-preview" 进行多模态生成。
-- 支持返回多张生成的图片，解析返回的候选结果，输出：
-  1) IMAGES: 生成的图片批次（多张图片以批次形式返回）；如果没有生成图片则回传输入的第1张图片。
-  2) STRING: 合并的文本输出（若有）。
+- 支持生成多个候选结果，解析返回的所有候选，输出：
+  1) IMAGES: 生成的图片批次（来自所有候选的图片）；如果没有生成图片则回传输入的第1张图片。
+  2) STRING: 合并的文本输出（来自所有候选）。
   3) BOOLEAN: 是否生成了新图片的标记。
   4) INT: 生成的图片数量。
 
-多图片处理特性:
-- 自动收集API响应中的所有图片部分
-- 将多张图片组合成一个ComfyUI批次张量
+多候选处理特性:
+- 通过 candidate_count 参数控制生成候选数量（1-4个）
+- 自动收集所有候选结果中的图片和文本
+- 将所有候选的图片组合成一个ComfyUI批次张量
 - 自动调整所有图片到相同尺寸（使用最大尺寸）
+- 文本输出会标注来自哪个候选（当有多个候选时）
 - 返回图片数量信息，便于后续处理
+
+候选数量说明:
+- candidate_count=1: 生成1个候选结果（默认）
+- candidate_count=2-4: 生成多个候选结果，增加图片多样性
 
 依赖:
 - pip install google-genai Pillow numpy torch
@@ -29,7 +35,8 @@ ComfyUI Custom Node: Gemini Generate Content (3-Image) - Multi-Image Output
 注意:
 - 本节点仅取每个 IMAGE 输入的 batch 第 0 张进行处理。
 - 输出的图片批次中，所有图片都会被调整到相同尺寸以保证张量一致性。
-- 严格遵从用户提供的示例用法: client.models.generate_content(model=..., contents=[prompt, image1, image2?, image3?])。
+- 更多候选数量会消耗更多API配额，请根据需要调整。
+- API调用: client.models.generate_content(model=..., contents=[...], generation_config={"candidate_count": N})。
 """
 
 import os
@@ -134,6 +141,13 @@ class GeminiGenerate:
             "optional": {
                 "image2": ("IMAGE", {}),  # 可选
                 "image3": ("IMAGE", {}),  # 可选
+                "candidate_count": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 4,
+                    "step": 1,
+                    "tooltip": "生成候选图片的数量（1-4张）"
+                }),
                 "model_name": ("STRING", {"default": "gemini-2.5-flash-image-preview"}),
                 "max_retries": ("INT", {
                     "default": 2,
@@ -160,7 +174,7 @@ class GeminiGenerate:
         # 环境变量会自动被SDK使用
         return genai.Client()
 
-    def generate(self, prompt, image1, seed, image2=None, image3=None, model_name="gemini-2.5-flash-image-preview", max_retries=2):
+    def generate(self, prompt, image1, seed, image2=None, image3=None, candidate_count=1, model_name="gemini-2.5-flash-image-preview", max_retries=2):
         # 构造 contents: [prompt, image1, (image2?), (image3?)]
         # seed 参数只用于 ComfyUI 节点，不传递给 Gemini API
         contents = [str(prompt)]
@@ -186,9 +200,15 @@ class GeminiGenerate:
                 if client is None:
                     client = self._get_client()
                 
+                # 配置生成参数
+                generation_config = {
+                    "candidate_count": candidate_count,
+                }
+                
                 resp = client.models.generate_content(
                     model=model_name,
                     contents=contents,
+                    generation_config=generation_config,
                 )
                 break  # 成功，退出重试循环
                 
@@ -239,46 +259,49 @@ class GeminiGenerate:
             if not hasattr(resp, 'candidates') or not resp.candidates:
                 texts.append("[Gemini Node] API 返回空响应，没有生成内容")
             else:
-                candidate = resp.candidates[0]
-                
-                # 检查是否有 finish_reason，这能告诉我们为什么没有内容
-                if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
-                    finish_reason = str(candidate.finish_reason)
+                # 遍历所有候选结果
+                for candidate_idx, candidate in enumerate(resp.candidates):
+                    candidate_prefix = f"[候选 {candidate_idx + 1}] " if len(resp.candidates) > 1 else ""
                     
-                    if 'PROHIBITED_CONTENT' in finish_reason:
-                        texts.append("[Gemini Node] 内容被拒绝：模型认为请求包含禁止的内容。请尝试修改提示词或图像。")
-                    elif 'SAFETY' in finish_reason:
-                        texts.append("[Gemini Node] 安全检查失败：请求触发了安全过滤器。请尝试使用更安全的内容。")
-                    elif 'MAX_TOKENS' in finish_reason:
-                        texts.append("[Gemini Node] 达到最大 token 限制，响应被截断。")
-                    elif 'STOP' in finish_reason:
-                        pass  # 正常完成，继续处理内容
-                    else:
-                        texts.append(f"[Gemini Node] 生成因未知原因停止：{finish_reason}")
-                
-                # 检查 content 是否存在
-                if not hasattr(candidate, 'content') or candidate.content is None:
-                    if not texts:  # 如果还没有添加错误信息
-                        texts.append("[Gemini Node] API 响应中没有内容数据")
-                else:
-                    content = candidate.content
-                    
-                    # 检查 parts 是否存在
-                    if not hasattr(content, 'parts') or not content.parts:
-                        texts.append("[Gemini Node] API 响应内容为空")
-                    else:
-                        parts = content.parts
+                    # 检查是否有 finish_reason，这能告诉我们为什么没有内容
+                    if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
+                        finish_reason = str(candidate.finish_reason)
                         
-                        for part in parts:
-                            if part.text is not None:
-                                texts.append(part.text)
-                            elif part.inline_data is not None:
-                                try:
-                                    pil = Image.open(BytesIO(part.inline_data.data))
-                                    generated_images.append(pil)
-                                    image_generated = True
-                                except Exception as img_e:
-                                    texts.append(f"[Gemini Node] Failed to process generated image: {img_e}")
+                        if 'PROHIBITED_CONTENT' in finish_reason:
+                            texts.append(f"{candidate_prefix}内容被拒绝：模型认为请求包含禁止的内容。")
+                        elif 'SAFETY' in finish_reason:
+                            texts.append(f"{candidate_prefix}安全检查失败：请求触发了安全过滤器。")
+                        elif 'MAX_TOKENS' in finish_reason:
+                            texts.append(f"{candidate_prefix}达到最大 token 限制，响应被截断。")
+                        elif 'STOP' in finish_reason:
+                            pass  # 正常完成，继续处理内容
+                        else:
+                            texts.append(f"{candidate_prefix}生成因未知原因停止：{finish_reason}")
+                    
+                    # 检查 content 是否存在
+                    if not hasattr(candidate, 'content') or candidate.content is None:
+                        if candidate_idx == 0 and not texts:  # 只为第一个候选添加错误信息
+                            texts.append(f"{candidate_prefix}API 响应中没有内容数据")
+                    else:
+                        content = candidate.content
+                        
+                        # 检查 parts 是否存在
+                        if not hasattr(content, 'parts') or not content.parts:
+                            texts.append(f"{candidate_prefix}响应内容为空")
+                        else:
+                            parts = content.parts
+                            
+                            for part in parts:
+                                if part.text is not None:
+                                    text_with_prefix = f"{candidate_prefix}{part.text}" if candidate_prefix else part.text
+                                    texts.append(text_with_prefix)
+                                elif part.inline_data is not None:
+                                    try:
+                                        pil = Image.open(BytesIO(part.inline_data.data))
+                                        generated_images.append(pil)
+                                        image_generated = True
+                                    except Exception as img_e:
+                                        texts.append(f"{candidate_prefix}Failed to process generated image: {img_e}")
                 
         except Exception as e:
             texts.append(f"[Gemini Node] Failed to parse response: {e}")
