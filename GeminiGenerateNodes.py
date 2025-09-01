@@ -1,16 +1,23 @@
 
 # -*- coding: utf-8 -*-
 """
-ComfyUI Custom Node: Gemini Generate Content (3-Image)
+ComfyUI Custom Node: Gemini Generate Content (3-Image) - Multi-Image Output
 
 功能:
 - 接收 1~3 张图片（第1张必需，另外2张可选），和一个文本 prompt。
 - 调用 Google AI 的 genai SDK（与用户示例一致: from google import genai），
   使用模型 "gemini-2.5-flash-image-preview" 进行多模态生成。
-- 解析返回的候选结果，输出：
-  1) IMAGE: 如果返回包含图片，则输出生成图片；否则回传输入的第1张图片。
+- 支持返回多张生成的图片，解析返回的候选结果，输出：
+  1) IMAGES: 生成的图片批次（多张图片以批次形式返回）；如果没有生成图片则回传输入的第1张图片。
   2) STRING: 合并的文本输出（若有）。
   3) BOOLEAN: 是否生成了新图片的标记。
+  4) INT: 生成的图片数量。
+
+多图片处理特性:
+- 自动收集API响应中的所有图片部分
+- 将多张图片组合成一个ComfyUI批次张量
+- 自动调整所有图片到相同尺寸（使用最大尺寸）
+- 返回图片数量信息，便于后续处理
 
 依赖:
 - pip install google-genai Pillow numpy torch
@@ -21,6 +28,7 @@ ComfyUI Custom Node: Gemini Generate Content (3-Image)
 
 注意:
 - 本节点仅取每个 IMAGE 输入的 batch 第 0 张进行处理。
+- 输出的图片批次中，所有图片都会被调整到相同尺寸以保证张量一致性。
 - 严格遵从用户提供的示例用法: client.models.generate_content(model=..., contents=[prompt, image1, image2?, image3?])。
 """
 
@@ -68,6 +76,44 @@ def _pil_to_comfy_image(pil_img):
     return tensor
 
 
+def _pil_list_to_comfy_images(pil_list):
+    """将 PIL.Image 列表转为 ComfyUI 的 IMAGE tensor ([N,H,W,3], float32, 0..1)。"""
+    if not pil_list:
+        return None
+    
+    # 转换所有图片并收集尺寸信息
+    arrays = []
+    max_height = 0
+    max_width = 0
+    
+    for pil_img in pil_list:
+        if pil_img.mode != "RGB":
+            pil_img = pil_img.convert("RGB")
+        arr = np.array(pil_img).astype(np.float32) / 255.0
+        if arr.ndim == 2:
+            arr = np.stack([arr] * 3, axis=-1)
+        if arr.shape[2] > 3:
+            arr = arr[:, :, :3]
+        
+        arrays.append(arr)
+        max_height = max(max_height, arr.shape[0])
+        max_width = max(max_width, arr.shape[1])
+    
+    # 将所有图片调整到相同尺寸（使用最大尺寸）
+    normalized_arrays = []
+    for arr in arrays:
+        if arr.shape[0] != max_height or arr.shape[1] != max_width:
+            # 将数组转回PIL图片进行尺寸调整
+            temp_pil = Image.fromarray((arr * 255.0).astype(np.uint8))
+            temp_pil = temp_pil.resize((max_width, max_height), Image.Resampling.LANCZOS)
+            arr = np.array(temp_pil).astype(np.float32) / 255.0
+        normalized_arrays.append(arr)
+    
+    # 堆叠成批次张量
+    batch_tensor = torch.from_numpy(np.stack(normalized_arrays, axis=0))
+    return batch_tensor
+
+
 class GeminiGenerate:
     @classmethod
     def INPUT_TYPES(cls):
@@ -98,8 +144,8 @@ class GeminiGenerate:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING", "BOOLEAN")
-    RETURN_NAMES = ("image", "text", "image_generated")
+    RETURN_TYPES = ("IMAGE", "STRING", "BOOLEAN", "INT")
+    RETURN_NAMES = ("images", "text", "image_generated", "image_count")
     FUNCTION = "generate"
     CATEGORY = "Google/GenAI"
     OUTPUT_NODE = False
@@ -128,7 +174,7 @@ class GeminiGenerate:
                 contents.append(_comfy_image_to_pil(image3))
         except Exception as e:
             # 转换失败，直接返回错误文本和原图
-            return image1, f"[Gemini Node] Failed to convert input images: {e}", False
+            return image1, f"[Gemini Node] Failed to convert input images: {e}", False, 1
 
         # API 调用重试逻辑
         client = None
@@ -169,22 +215,22 @@ class GeminiGenerate:
             
             # 检查具体的错误类型并提供相应的建议
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                return image1, f"[Gemini Node] API配额已用完，请稍后重试或升级计划。", False
+                return image1, f"[Gemini Node] API配额已用完，请稍后重试或升级计划。", False, 1
             elif "400" in error_str and "User location is not supported" in error_str:
-                return image1, f"[Gemini Node] 地理位置限制：你所在的地区不支持使用 Gemini API。请检查代理设置。", False
+                return image1, f"[Gemini Node] 地理位置限制：你所在的地区不支持使用 Gemini API。请检查代理设置。", False, 1
             elif "PROHIBITED_CONTENT" in error_str:
-                return image1, f"[Gemini Node] 内容被拒绝：模型认为请求包含禁止的内容。请尝试修改提示词或图像。", False
+                return image1, f"[Gemini Node] 内容被拒绝：模型认为请求包含禁止的内容。请尝试修改提示词或图像。", False, 1
             elif "500" in error_str or "INTERNAL" in error_str:
-                return image1, f"[Gemini Node] Google 服务器内部错误 (500)，已重试 {max_retries} 次仍失败，请稍后再试。", False
+                return image1, f"[Gemini Node] Google 服务器内部错误 (500)，已重试 {max_retries} 次仍失败，请稍后再试。", False, 1
             elif "503" in error_str or "SERVICE_UNAVAILABLE" in error_str:
-                return image1, f"[Gemini Node] 服务暂时不可用 (503)，已重试 {max_retries} 次仍失败，请稍后再试。", False
+                return image1, f"[Gemini Node] 服务暂时不可用 (503)，已重试 {max_retries} 次仍失败，请稍后再试。", False, 1
             elif "FAILED_PRECONDITION" in error_str:
-                return image1, f"[Gemini Node] API 使用条件不满足，可能是地理位置限制或其他条件问题。", False
+                return image1, f"[Gemini Node] API 使用条件不满足，可能是地理位置限制或其他条件问题。", False, 1
             else:
-                return image1, f"[Gemini Node] API call failed after {max_retries + 1} attempts: {last_error}", False
+                return image1, f"[Gemini Node] API call failed after {max_retries + 1} attempts: {last_error}", False, 1
 
         texts = []
-        out_tensor = None
+        generated_images = []  # 收集所有生成的图片
         image_generated = False
 
         try:
@@ -229,7 +275,7 @@ class GeminiGenerate:
                             elif part.inline_data is not None:
                                 try:
                                     pil = Image.open(BytesIO(part.inline_data.data))
-                                    out_tensor = _pil_to_comfy_image(pil)
+                                    generated_images.append(pil)
                                     image_generated = True
                                 except Exception as img_e:
                                     texts.append(f"[Gemini Node] Failed to process generated image: {img_e}")
@@ -237,12 +283,19 @@ class GeminiGenerate:
         except Exception as e:
             texts.append(f"[Gemini Node] Failed to parse response: {e}")
 
-        if out_tensor is None:
-            out_tensor = image1  # 未生成图片则回传输入的第1张
+        # 处理图片输出
+        if generated_images:
+            # 如果有生成的图片，转换为ComfyUI格式
+            out_tensor = _pil_list_to_comfy_images(generated_images)
+            image_count = len(generated_images)
+        else:
+            # 未生成图片则回传输入的第1张
+            out_tensor = image1
             image_generated = False
+            image_count = 1
 
         text_out = "\n".join([t for t in texts if t])
-        return out_tensor, text_out, image_generated
+        return out_tensor, text_out, image_generated, image_count
 
 
 NODE_CLASS_MAPPINGS = {
