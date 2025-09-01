@@ -190,48 +190,86 @@ class GeminiGenerate:
             # 转换失败，直接返回错误文本和原图
             return image1, f"[Gemini Node] Failed to convert input images: {e}", False, 1
 
-        # API 调用重试逻辑
+        # API 调用重试逻辑 - 支持多次调用获得多候选
         client = None
-        resp = None
+        responses = []  # 存储所有响应
         last_error = None
         
-        for attempt in range(max_retries + 1):
-            try:
-                if client is None:
-                    client = self._get_client()
-                
-                # 配置生成参数
-                generation_config = {
-                    "candidate_count": candidate_count,
-                }
-                
-                resp = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    generation_config=generation_config,
-                )
-                break  # 成功，退出重试循环
-                
-            except Exception as e:
-                last_error = e
-                error_str = str(e)
-                
-                # 对于某些错误，不进行重试
-                if ("400" in error_str or "FAILED_PRECONDITION" in error_str or 
-                    "User location is not supported" in error_str or
-                    "RESOURCE_EXHAUSTED" in error_str or
-                    "PROHIBITED_CONTENT" in error_str):
+        # 尝试获取多个候选结果
+        for candidate_idx in range(candidate_count):
+            resp = None
+            for attempt in range(max_retries + 1):
+                try:
+                    if client is None:
+                        client = self._get_client()
+                    
+                    # 尝试不同的参数传递方式
+                    try:
+                        # 方法1: 直接传递candidate_count参数
+                        resp = client.models.generate_content(
+                            model=model_name,
+                            contents=contents,
+                            candidate_count=candidate_count,
+                        )
+                        # 如果成功且返回多个候选，直接使用这个响应
+                        if hasattr(resp, 'candidates') and len(resp.candidates) >= candidate_count:
+                            responses = [resp]  # 使用这个包含多候选的响应
+                            break  # 退出候选循环
+                    except TypeError as e1:
+                        try:
+                            # 方法2: 使用generation_config字典
+                            generation_config = {
+                                "candidate_count": candidate_count,
+                            }
+                            resp = client.models.generate_content(
+                                model=model_name,
+                                contents=contents,
+                                generation_config=generation_config,
+                            )
+                            # 如果成功且返回多个候选，直接使用这个响应
+                            if hasattr(resp, 'candidates') and len(resp.candidates) >= candidate_count:
+                                responses = [resp]  # 使用这个包含多候选的响应
+                                break  # 退出候选循环
+                        except TypeError as e2:
+                            # 方法3: 回退到单次调用
+                            if candidate_idx == 0:  # 只在第一次警告
+                                print(f"[Gemini Node] Warning: API不支持candidate_count参数，将通过多次调用获得{candidate_count}个结果")
+                            resp = client.models.generate_content(
+                                model=model_name,
+                                contents=contents,
+                            )
+                    break  # 成功，退出重试循环
+                    
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
+                    
+                    # 对于某些错误，不进行重试
+                    if ("400" in error_str or "FAILED_PRECONDITION" in error_str or 
+                        "User location is not supported" in error_str or
+                        "RESOURCE_EXHAUSTED" in error_str or
+                        "PROHIBITED_CONTENT" in error_str):
+                        break
+                    
+                    # 对于可重试的错误（如 500），等待后重试
+                    if attempt < max_retries:
+                        import time
+                        wait_time = (attempt + 1) * 2  # 递增等待时间：2秒, 4秒, 6秒...
+                        time.sleep(wait_time)
+            
+            # 如果获得了响应，添加到列表中
+            if resp is not None:
+                responses.append(resp)
+                # 如果这个响应包含多个候选，就不需要继续循环了
+                if hasattr(resp, 'candidates') and len(resp.candidates) > 1:
                     break
-                
-                # 对于可重试的错误（如 500），等待后重试
-                if attempt < max_retries:
-                    import time
-                    wait_time = (attempt + 1) * 2  # 递增等待时间：2秒, 4秒, 6秒...
-                    time.sleep(wait_time)
+            else:
+                # 如果这次调用失败，停止尝试更多候选
+                break
         
         # 处理最终失败的情况
-        if resp is None:
-            error_str = str(last_error)
+        if not responses:
+            error_str = str(last_error) if last_error else "Unknown error"
             
             # 检查具体的错误类型并提供相应的建议
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
@@ -254,14 +292,22 @@ class GeminiGenerate:
         image_generated = False
 
         try:
-            # 安全地解析响应
-            # 检查响应结构
-            if not hasattr(resp, 'candidates') or not resp.candidates:
-                texts.append("[Gemini Node] API 返回空响应，没有生成内容")
-            else:
-                # 遍历所有候选结果
+            # 安全地解析所有响应
+            total_candidates = 0
+            for resp_idx, resp in enumerate(responses):
+                # 检查响应结构
+                if not hasattr(resp, 'candidates') or not resp.candidates:
+                    texts.append(f"[响应 {resp_idx + 1}] API 返回空响应，没有生成内容")
+                    continue
+                
+                # 遍历这个响应中的所有候选结果
                 for candidate_idx, candidate in enumerate(resp.candidates):
-                    candidate_prefix = f"[候选 {candidate_idx + 1}] " if len(resp.candidates) > 1 else ""
+                    total_candidates += 1
+                    # 当有多个响应或多个候选时显示标识
+                    if len(responses) > 1 or len(resp.candidates) > 1:
+                        candidate_prefix = f"[候选 {total_candidates}] "
+                    else:
+                        candidate_prefix = ""
                     
                     # 检查是否有 finish_reason，这能告诉我们为什么没有内容
                     if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
@@ -280,7 +326,7 @@ class GeminiGenerate:
                     
                     # 检查 content 是否存在
                     if not hasattr(candidate, 'content') or candidate.content is None:
-                        if candidate_idx == 0 and not texts:  # 只为第一个候选添加错误信息
+                        if total_candidates == 1 and not texts:  # 只为第一个候选添加错误信息
                             texts.append(f"{candidate_prefix}API 响应中没有内容数据")
                     else:
                         content = candidate.content
