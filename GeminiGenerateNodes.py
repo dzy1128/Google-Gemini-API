@@ -40,6 +40,8 @@ ComfyUI Custom Node: Gemini Generate Content (3-Image) - Multi-Candidate Output
 """
 
 import os
+import base64
+import random
 from io import BytesIO
 
 import numpy as np
@@ -50,6 +52,11 @@ try:
     from google import genai
 except Exception as e:
     genai = None
+
+try:
+    from openai import OpenAI
+except Exception as e:
+    OpenAI = None
 
 
 def _comfy_image_to_pil(img_tensor):
@@ -119,6 +126,16 @@ def _pil_list_to_comfy_images(pil_list):
     # 堆叠成批次张量
     batch_tensor = torch.from_numpy(np.stack(normalized_arrays, axis=0))
     return batch_tensor
+
+
+def _pil_to_base64(pil_img, format="JPEG"):
+    """将 PIL.Image 转换为 base64 编码字符串。"""
+    buffer = BytesIO()
+    if pil_img.mode != "RGB":
+        pil_img = pil_img.convert("RGB")
+    pil_img.save(buffer, format=format)
+    img_data = buffer.getvalue()
+    return base64.b64encode(img_data).decode('utf-8')
 
 
 class GeminiGenerate:
@@ -367,11 +384,202 @@ class GeminiGenerate:
         return out_tensor, text_out, image_generated, image_count
 
 
+class OpenAIGeminiGenerate:
+    """
+    ComfyUI Custom Node: OpenAI 兼容格式的 Gemini 生成节点
+    
+    功能:
+    - 通过 OpenAI 兼容的 API 接口调用 Gemini 模型
+    - 支持图片输入，使用 base64 编码
+    - 从环境变量获取 API Key
+    - 必需设置 seed 值（最小值为0）
+    - 必需指定 model_name（默认：gemini-2.5-flash-image-preview）
+    - 支持 reasoning_content 输出（思考过程）
+    
+    依赖:
+    - pip install openai Pillow numpy torch
+    - 需配置环境变量：OPENAI_API_KEY 或 DEEPSEEK_API_KEY
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("STRING", {
+                    "multiline": True,
+                    "default": "请分析这张图片的内容，并生成一张相关的新图片。"
+                }),
+                "image": ("IMAGE", {}),
+                "seed": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 0xffffffffffffffff,
+                    "step": 1,
+                    "tooltip": "随机种子，最小值为0"
+                }),
+                "model_name": ("STRING", {
+                    "default": "gemini-2.5-flash-image-preview"
+                }),
+                "api_key_env": (["OPENAI_API_KEY", "DEEPSEEK_API_KEY"], {
+                    "default": "DEEPSEEK_API_KEY"
+                }),
+                "base_url": ("STRING", {
+                    "default": "https://www.chataiapi.com/v1"
+                }),
+            },
+            "optional": {
+                "max_retries": ("INT", {
+                    "default": 2,
+                    "min": 0,
+                    "max": 5,
+                    "step": 1
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "BOOLEAN")
+    RETURN_NAMES = ("images", "reasoning", "final_answer", "image_generated")
+    FUNCTION = "generate"
+    CATEGORY = "Google/GenAI"
+    OUTPUT_NODE = False
+
+    def _get_client(self, api_key_env, base_url):
+        """获取 OpenAI 客户端"""
+        if OpenAI is None:
+            raise RuntimeError("openai SDK not installed. Please run: pip install openai")
+        
+        # 从环境变量获取 API Key
+        api_key = os.getenv(api_key_env, "").strip()
+        if not api_key:
+            raise RuntimeError(f"{api_key_env} environment variable is required but not set")
+        
+        return OpenAI(
+            api_key=api_key,
+            base_url=base_url
+        )
+
+    def generate(self, prompt, image, seed, model_name, api_key_env="DEEPSEEK_API_KEY", 
+                 base_url="https://www.chataiapi.com/v1", max_retries=2):
+        
+        # seed 现在是必需参数，直接使用传入的值
+        
+        try:
+            # 转换图片为 PIL 格式
+            pil_img = _comfy_image_to_pil(image)
+            
+            # 将图片转换为 base64
+            base64_img = _pil_to_base64(pil_img)
+            
+        except Exception as e:
+            return image, "", f"[OpenAI Gemini Node] Failed to process input image: {e}", False
+
+        # 构建消息
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": str(prompt)},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_img}"
+                        }
+                    }
+                ]
+            }
+        ]
+
+        # API 调用重试逻辑
+        client = None
+        last_error = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                if client is None:
+                    client = self._get_client(api_key_env, base_url)
+                
+                # 调用 API
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    seed=seed
+                )
+                
+                # 解析响应
+                if not response.choices:
+                    return image, "", "[OpenAI Gemini Node] API 返回空响应", False
+                
+                choice = response.choices[0]
+                message = choice.message
+                
+                # 提取 reasoning_content 和 content
+                reasoning_content = ""
+                final_answer = ""
+                
+                if hasattr(message, 'reasoning_content') and message.reasoning_content:
+                    reasoning_content = message.reasoning_content
+                
+                if hasattr(message, 'content') and message.content:
+                    final_answer = message.content
+                
+                # 检查是否有生成的图片
+                generated_images = []
+                image_generated = False
+                
+                # TODO: 根据实际 API 响应格式处理图片数据
+                # 目前假设只返回文本，如果 API 支持图片生成，需要相应处理
+                
+                if generated_images:
+                    out_tensor = _pil_list_to_comfy_images(generated_images)
+                    image_generated = True
+                else:
+                    # 未生成图片则回传输入图片
+                    out_tensor = image
+                    image_generated = False
+                
+                return out_tensor, reasoning_content, final_answer, image_generated
+                
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                
+                # 对于某些错误，不进行重试
+                if any(keyword in error_str for keyword in [
+                    "400", "401", "403", "FAILED_PRECONDITION", 
+                    "User location is not supported", "PROHIBITED_CONTENT"
+                ]):
+                    break
+                
+                # 对于可重试的错误，等待后重试
+                if attempt < max_retries:
+                    import time
+                    wait_time = (attempt + 1) * 2
+                    time.sleep(wait_time)
+        
+        # 处理最终失败
+        error_str = str(last_error) if last_error else "Unknown error"
+        
+        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+            error_msg = "[OpenAI Gemini Node] API配额已用完，请稍后重试或升级计划。"
+        elif "401" in error_str:
+            error_msg = "[OpenAI Gemini Node] API Key 无效，请检查环境变量设置。"
+        elif "400" in error_str and "User location is not supported" in error_str:
+            error_msg = "[OpenAI Gemini Node] 地理位置限制：你所在的地区不支持使用此 API。"
+        elif "PROHIBITED_CONTENT" in error_str:
+            error_msg = "[OpenAI Gemini Node] 内容被拒绝：模型认为请求包含禁止的内容。"
+        else:
+            error_msg = f"[OpenAI Gemini Node] API call failed: {last_error}"
+        
+        return image, "", error_msg, False
+
+
 NODE_CLASS_MAPPINGS = {
     "GeminiGenerate": GeminiGenerate,
+    "OpenAIGeminiGenerate": OpenAIGeminiGenerate,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GeminiGenerate": "Gemini Generate",
+    "OpenAIGeminiGenerate": "OpenAI Gemini Generate",
 }
 
