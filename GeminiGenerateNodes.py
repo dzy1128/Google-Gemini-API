@@ -386,15 +386,21 @@ class GeminiGenerate:
 
 class OpenAIGeminiGenerate:
     """
-    ComfyUI Custom Node: OpenAI 兼容格式的 Gemini 生成节点
+    ComfyUI Custom Node: OpenAI 兼容格式的 Gemini 生成节点（多图片支持）
     
     功能:
     - 通过 OpenAI 兼容的 API 接口调用 Gemini 模型
-    - 支持图片输入，使用 base64 编码
+    - 支持多张图片输入：第1张必选，第2、3张可选
+    - 图片自动转换为 base64 编码
     - 从环境变量获取 API Key
     - 必需设置 seed 值（最小值为0）
     - 必需指定 model_name（默认：gemini-2.5-flash-image-preview）
-    - 支持 reasoning_content 输出（思考过程）
+    - 支持 reasoning_content 输出（思考过程和最终答案分离）
+    
+    输入:
+    - image1: 第一张图片（必选）
+    - image2: 第二张图片（可选）
+    - image3: 第三张图片（可选）
     
     依赖:
     - pip install openai Pillow numpy torch
@@ -407,9 +413,9 @@ class OpenAIGeminiGenerate:
             "required": {
                 "prompt": ("STRING", {
                     "multiline": True,
-                    "default": "请分析这张图片的内容，并生成一张相关的新图片。"
+                    "default": "请分析这些图片的内容，并生成一张相关的新图片。"
                 }),
-                "image": ("IMAGE", {}),
+                "image1": ("IMAGE", {}),  # 第一张图片必选
                 "seed": ("INT", {
                     "default": 0,
                     "min": 0,
@@ -428,6 +434,8 @@ class OpenAIGeminiGenerate:
                 }),
             },
             "optional": {
+                "image2": ("IMAGE", {}),  # 第二张图片可选
+                "image3": ("IMAGE", {}),  # 第三张图片可选
                 "max_retries": ("INT", {
                     "default": 2,
                     "min": 0,
@@ -458,34 +466,57 @@ class OpenAIGeminiGenerate:
             base_url=base_url
         )
 
-    def generate(self, prompt, image, seed, model_name, api_key_env="DEEPSEEK_API_KEY", 
-                 base_url="https://www.chataiapi.com/v1", max_retries=2):
+    def generate(self, prompt, image1, seed, model_name, api_key_env="DEEPSEEK_API_KEY", 
+                 base_url="https://www.chataiapi.com/v1", image2=None, image3=None, max_retries=2):
         
         # seed 现在是必需参数，直接使用传入的值
         
         try:
-            # 转换图片为 PIL 格式
-            pil_img = _comfy_image_to_pil(image)
+            # 处理第一张图片（必选）
+            pil_img1 = _comfy_image_to_pil(image1)
+            base64_img1 = _pil_to_base64(pil_img1)
             
-            # 将图片转换为 base64
-            base64_img = _pil_to_base64(pil_img)
+            # 构建内容列表，从文本开始
+            content_list = [{"type": "text", "text": str(prompt)}]
+            
+            # 添加第一张图片
+            content_list.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{base64_img1}"
+                }
+            })
+            
+            # 处理第二张图片（可选）
+            if image2 is not None:
+                pil_img2 = _comfy_image_to_pil(image2)
+                base64_img2 = _pil_to_base64(pil_img2)
+                content_list.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_img2}"
+                    }
+                })
+            
+            # 处理第三张图片（可选）
+            if image3 is not None:
+                pil_img3 = _comfy_image_to_pil(image3)
+                base64_img3 = _pil_to_base64(pil_img3)
+                content_list.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_img3}"
+                    }
+                })
             
         except Exception as e:
-            return image, "", f"[OpenAI Gemini Node] Failed to process input image: {e}", False
+            return image1, "", f"[OpenAI Gemini Node] Failed to process input images: {e}", False
 
         # 构建消息
         messages = [
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": str(prompt)},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_img}"
-                        }
-                    }
-                ]
+                "content": content_list
             }
         ]
 
@@ -507,7 +538,7 @@ class OpenAIGeminiGenerate:
                 
                 # 解析响应
                 if not response.choices:
-                    return image, "", "[OpenAI Gemini Node] API 返回空响应", False
+                    return image1, "", "[OpenAI Gemini Node] API 返回空响应", False
                 
                 choice = response.choices[0]
                 message = choice.message
@@ -533,8 +564,8 @@ class OpenAIGeminiGenerate:
                     out_tensor = _pil_list_to_comfy_images(generated_images)
                     image_generated = True
                 else:
-                    # 未生成图片则回传输入图片
-                    out_tensor = image
+                    # 未生成图片则回传第一张输入图片
+                    out_tensor = image1
                     image_generated = False
                 
                 return out_tensor, reasoning_content, final_answer, image_generated
@@ -570,7 +601,7 @@ class OpenAIGeminiGenerate:
         else:
             error_msg = f"[OpenAI Gemini Node] API call failed: {last_error}"
         
-        return image, "", error_msg, False
+        return image1, "", error_msg, False
 
 
 NODE_CLASS_MAPPINGS = {
