@@ -429,7 +429,8 @@ class OpenAIGeminiGenerate:
                     "tooltip": "随机种子，最小值为0，最大值为2147483647 (INT32范围)"
                 }),
                 "model_name": ("STRING", {
-                    "default": "gemini-2.5-flash-image-preview"
+                    "default": "gemini-2.5-flash-image-preview",
+                    "tooltip": "常用模型名称: gemini-2.5-flash-image-preview, gemini-pro-vision, gpt-4-vision-preview, gpt-4o"
                 }),
                 "api_key_env": (["OPENAI_API_KEY", "DEEPSEEK_API_KEY"], {
                     "default": "DEEPSEEK_API_KEY"
@@ -477,6 +478,9 @@ class OpenAIGeminiGenerate:
         # 验证 seed 值范围（API 要求 INT32 范围）
         if seed < 0 or seed > 2147483647:
             return image1, "", f"[OpenAI Gemini Node] Seed 值必须在 0 到 2147483647 范围内，当前值: {seed}", False
+        
+        print(f"[DEBUG] 开始处理请求 - 模型: {model_name}")
+        print(f"[DEBUG] API配置 - 环境变量: {api_key_env}, 基础URL: {base_url}")
         
         try:
             # 处理第一张图片（必选）
@@ -537,18 +541,29 @@ class OpenAIGeminiGenerate:
                     client = self._get_client(api_key_env, base_url)
                 
                 # 调用 API
+                print(f"[DEBUG] 调用API - 模型: {model_name}, seed: {seed}")
+                print(f"[DEBUG] 消息数量: {len(messages)}, 内容项数量: {len(messages[0]['content'])}")
+                
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=messages,
                     seed=seed
                 )
                 
+                print(f"[DEBUG] API调用成功，响应类型: {type(response)}")
+                
                 # 解析响应
                 if not response.choices:
                     return image1, "", "[OpenAI Gemini Node] API 返回空响应", False
                 
+                print(f"[DEBUG] 响应包含 {len(response.choices)} 个选择")
+                
                 choice = response.choices[0]
                 message = choice.message
+                
+                print(f"[DEBUG] Message 对象属性: {[attr for attr in dir(message) if not attr.startswith('_')]}")
+                print(f"[DEBUG] Message content: {getattr(message, 'content', 'NO CONTENT')}")
+                print(f"[DEBUG] Message reasoning_content: {getattr(message, 'reasoning_content', 'NO REASONING')}")
                 
                 # 提取 reasoning_content 和 content
                 reasoning_content = ""
@@ -556,9 +571,18 @@ class OpenAIGeminiGenerate:
                 
                 if hasattr(message, 'reasoning_content') and message.reasoning_content:
                     reasoning_content = message.reasoning_content
+                    print(f"[DEBUG] 找到 reasoning_content: {len(reasoning_content)} 字符")
+                else:
+                    print(f"[DEBUG] 没有找到 reasoning_content")
                 
                 if hasattr(message, 'content') and message.content:
                     final_answer = message.content
+                    print(f"[DEBUG] 找到 content: {len(final_answer)} 字符")
+                else:
+                    print(f"[DEBUG] 没有找到 content")
+                
+                # 尝试获取原始响应的完整信息
+                print(f"[DEBUG] 完整响应内容预览: {str(response)[:500]}...")
                 
                 # 检查是否有生成的图片
                 generated_images = []
@@ -598,6 +622,11 @@ class OpenAIGeminiGenerate:
                     # 未生成图片则回传第一张输入图片
                     out_tensor = image1
                     image_generated = False
+                
+                # 如果没有获得任何内容，返回调试信息
+                if not reasoning_content and not final_answer:
+                    debug_info = f"[调试信息] API调用成功但未返回内容。模型: {model_name}, 响应选择数: {len(response.choices)}"
+                    return out_tensor, debug_info, "API响应为空，请检查模型名称和API配置", image_generated
                 
                 return out_tensor, reasoning_content, final_answer, image_generated
                 
