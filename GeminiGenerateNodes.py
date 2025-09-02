@@ -19,7 +19,7 @@ ComfyUI Custom Node: Gemini Generate & Edit Image Nodes
 2. Gemini Edit Image (5-Image) - Image Editing Node
 功能:
 - 接收 1~5 张图片（第1张必需，其余4张可选），和一个文本 prompt。
-- 使用 OpenAI 兼容的 API 接口，默认使用 "https://www.chataiapi.com/v1/chat/completions"
+- 使用 OpenAI 兼容的 API 接口，默认使用 "https://www.chataiapi.com/v1"
 - 使用模型 "gemini-2.5-flash-image-preview" 进行图片编辑。
 - 支持 seed 参数控制生成的随机性（最小值为0）。
 - 支持输出多张图片（1-4张）。
@@ -181,7 +181,7 @@ class GeminiEditImage:
                 "image4": ("IMAGE", {}),  # 可选
                 "image5": ("IMAGE", {}),  # 可选
                 "model_name": ("STRING", {"default": "gemini-2.5-flash-image-preview"}),
-                "api_url": ("STRING", {"default": "https://www.chataiapi.com/v1/chat/completions"}),
+                "api_url": ("STRING", {"default": "https://www.chataiapi.com/v1"}),
                 "max_retries": ("INT", {
                     "default": 2,
                     "min": 0,
@@ -213,7 +213,7 @@ class GeminiEditImage:
         )
 
     def edit_images(self, prompt, image1, seed, num_outputs=1, image2=None, image3=None, image4=None, image5=None, 
-                   model_name="gemini-2.5-flash-image-preview", api_url="https://www.chataiapi.com/v1/chat/completions", max_retries=2):
+                   model_name="gemini-2.5-flash-image-preview", api_url="https://www.chataiapi.com/v1", max_retries=2):
         
         # 准备图片列表
         images = [image1]
