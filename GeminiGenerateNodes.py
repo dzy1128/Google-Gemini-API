@@ -42,6 +42,8 @@ ComfyUI Custom Node: Gemini Generate Content (3-Image) - Multi-Candidate Output
 import os
 import base64
 import random
+import requests
+import json
 from io import BytesIO
 
 import numpy as np
@@ -664,13 +666,211 @@ class OpenAIGeminiGenerate:
         return image1, "", error_msg, False
 
 
+class GoogleImagenGenerate:
+    """
+    ComfyUI Custom Node: Google Gemini 图片生成节点
+    
+    功能:
+    - 使用 Google 原生 API 调用 Gemini 模型生成图片
+    - 支持从文本提示词生成高质量图片
+    - 从环境变量获取 Google API Key
+    - 支持多种图片尺寸和数量配置
+    - 支持 seed 控制生成的随机性
+    
+    支持的模型:
+    - gemini-2.5-flash-image-preview: Gemini 2.5 图片预览模型（默认）
+    - imagen-3.0: Google Imagen 3.0 图片生成模型
+    - 支持高质量图片生成
+    - 支持中文提示词
+    
+    依赖:
+    - pip install requests Pillow numpy torch
+    - 需配置环境变量：GOOGLE_API_KEY
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("STRING", {
+                    "multiline": True,
+                    "default": "一只戴着太空头盔的橘猫，漂浮在宇宙中，4K超清画质，数字艺术风格"
+                }),
+                "model": (["gemini-2.5-flash-image-preview", "imagen-3.0"], {
+                    "default": "gemini-2.5-flash-image-preview"
+                }),
+                "size": (["1024x1024", "512x512", "256x256"], {
+                    "default": "1024x1024"
+                }),
+                "n": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 4,
+                    "step": 1,
+                    "tooltip": "生成图片的数量 (1-4张)"
+                }),
+            },
+            "optional": {
+                "seed": ("INT", {
+                    "default": -1,
+                    "min": -1,
+                    "max": 2147483647,
+                    "step": 1,
+                    "tooltip": "随机种子，-1为自动生成"
+                }),
+                "max_retries": ("INT", {
+                    "default": 2,
+                    "min": 0,
+                    "max": 5,
+                    "step": 1
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "BOOLEAN", "INT")
+    RETURN_NAMES = ("images", "info", "success", "image_count")
+    FUNCTION = "generate"
+    CATEGORY = "Google/GenAI"
+    OUTPUT_NODE = False
+
+    def generate(self, prompt, model="imagen-3.0", size="1024x1024", n=1, seed=-1, max_retries=2):
+        
+        # 处理随机种子
+        if seed == -1:
+            seed = random.randint(0, 2147483647)
+        
+        # 获取 API Key
+        api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+        if not api_key:
+            dummy_image = torch.zeros(1, 512, 512, 3)
+            return dummy_image, "[Google Imagen Node] GOOGLE_API_KEY 环境变量未设置", False, 0
+        
+        # 构建 API URL
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateImages"
+        
+        # 设置请求头
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # 构建请求载荷
+        payload = {
+            "prompt": str(prompt),
+            "size": size,
+            "n": n
+        }
+        
+        # 如果需要seed控制（API支持的话）
+        if seed > 0:
+            payload["seed"] = seed
+        
+        print(f"[DEBUG] 调用 Google API - 模型: {model}")
+        print(f"[DEBUG] 提示词: {prompt[:100]}...")
+        print(f"[DEBUG] 参数: size={size}, n={n}, seed={seed}")
+        
+        # 特别提示：gemini-2.5-flash-image-preview 主要是视觉理解模型
+        if "gemini" in model.lower() and "preview" in model.lower():
+            print(f"[WARNING] 注意：{model} 主要是视觉理解模型，图片生成能力可能有限")
+        
+        # API 调用重试逻辑
+        last_error = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
+                
+                print(f"[DEBUG] API响应状态码: {response.status_code}")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    print(f"[DEBUG] 响应数据结构: {list(data.keys())}")
+                    
+                    # 解析生成的图片
+                    generated_images = []
+                    
+                    if "images" in data:
+                        print(f"[DEBUG] 找到 {len(data['images'])} 张图片")
+                        
+                        for i, img_info in enumerate(data["images"]):
+                            try:
+                                if "imageBytes" in img_info:
+                                    # 解码 base64 图片数据
+                                    image_data = base64.b64decode(img_info["imageBytes"])
+                                    pil_img = Image.open(BytesIO(image_data))
+                                    generated_images.append(pil_img)
+                                    print(f"[DEBUG] 成功解析图片 {i+1}: {pil_img.size}")
+                                else:
+                                    print(f"[DEBUG] 图片 {i+1} 缺少 imageBytes 字段")
+                            except Exception as img_e:
+                                print(f"[DEBUG] 解析图片 {i+1} 失败: {img_e}")
+                    else:
+                        print(f"[DEBUG] 响应中没有找到 'images' 字段")
+                        print(f"[DEBUG] 完整响应: {data}")
+                    
+                    if generated_images:
+                        # 转换为 ComfyUI 格式
+                        out_tensor = _pil_list_to_comfy_images(generated_images)
+                        info_text = f"✅ 成功生成 {len(generated_images)} 张图片 (模型: {model}, 尺寸: {size})"
+                        return out_tensor, info_text, True, len(generated_images)
+                    else:
+                        dummy_image = torch.zeros(1, 512, 512, 3)
+                        return dummy_image, "[Google Imagen Node] API 返回成功但未找到图片数据", False, 0
+                
+                else:
+                    error_data = response.text
+                    print(f"[DEBUG] API错误响应: {error_data}")
+                    
+                    try:
+                        error_json = response.json()
+                        error_msg = error_json.get("error", {}).get("message", "未知错误")
+                    except:
+                        error_msg = f"HTTP {response.status_code}: {error_data[:200]}"
+                    
+                    last_error = Exception(f"API错误: {error_msg}")
+                    
+                    # 对于某些错误不重试
+                    if response.status_code in [400, 401, 403]:
+                        break
+                        
+            except requests.exceptions.Timeout:
+                last_error = Exception("请求超时")
+            except Exception as e:
+                last_error = e
+                print(f"[DEBUG] 请求异常: {e}")
+            
+            # 等待后重试
+            if attempt < max_retries:
+                import time
+                wait_time = (attempt + 1) * 2
+                print(f"[DEBUG] 等待 {wait_time} 秒后重试...")
+                time.sleep(wait_time)
+        
+        # 最终失败处理
+        dummy_image = torch.zeros(1, 512, 512, 3)
+        error_str = str(last_error) if last_error else "未知错误"
+        
+        if "401" in error_str or "authentication" in error_str.lower():
+            error_msg = "[Google Imagen Node] API Key 无效或未授权，请检查 GOOGLE_API_KEY 环境变量"
+        elif "quota" in error_str.lower() or "429" in error_str:
+            error_msg = "[Google Imagen Node] API 配额已用完，请稍后重试"
+        elif "timeout" in error_str.lower():
+            error_msg = "[Google Imagen Node] 请求超时，请稍后重试"
+        else:
+            error_msg = f"[Google Imagen Node] 生成失败: {error_str}"
+        
+        return dummy_image, error_msg, False, 0
+
+
 NODE_CLASS_MAPPINGS = {
     "GeminiGenerate": GeminiGenerate,
     "OpenAIGeminiGenerate": OpenAIGeminiGenerate,
+    "GoogleImagenGenerate": GoogleImagenGenerate,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "GeminiGenerate": "Gemini Generate",
-    "OpenAIGeminiGenerate": "OpenAI Gemini Generate",
+    "OpenAIGeminiGenerate": "OpenAI Gemini Generate", 
+    "GoogleImagenGenerate": "Google Gemini Generate",
 }
 
