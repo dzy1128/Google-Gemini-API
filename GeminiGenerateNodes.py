@@ -699,7 +699,12 @@ class GoogleImagenGenerate:
     
     依赖:
     - pip install requests Pillow numpy torch
-    - 需配置环境变量：GOOGLE_API_KEY
+    - 需配置环境变量：DEEPSEEK_API_KEY、OPENAI_API_KEY 或 GOOGLE_API_KEY
+    
+    注意:
+    - 当前配置使用 OpenAI 兼容 API 格式
+    - 主要返回图片分析和编辑建议文本
+    - 如需真正的图片生成，可能需要不同的API端点
     """
     
     @classmethod
@@ -759,10 +764,10 @@ class GoogleImagenGenerate:
         if seed == -1:
             seed = random.randint(0, 2147483647)
         
-        # 获取 API Key
-        api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+        # 获取 API Key - 尝试多个环境变量
+        api_key = os.getenv("DEEPSEEK_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
         if not api_key:
-            return image1, "[Google Imagen Node] GOOGLE_API_KEY 环境变量未设置", False, 0
+            return image1, "[Google Imagen Node] 未找到API Key，请设置 DEEPSEEK_API_KEY、OPENAI_API_KEY 或 GOOGLE_API_KEY 环境变量", False, 0
         
         # 处理输入图片
         input_images = []
@@ -787,19 +792,34 @@ class GoogleImagenGenerate:
         
         # 构建 API URL
         #url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateImages"
-        url = f"https://www.chataiapi.com/v1"
+        url = f"https://www.chataiapi.com/v1/chat/completions"
         # 设置请求头
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         
-        # 构建请求载荷
+        # 构建OpenAI兼容格式的消息
+        content_list = [{"type": "text", "text": str(prompt)}]
+        
+        # 添加输入图片到消息内容
+        for i, img_base64 in enumerate(input_images):
+            content_list.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{img_base64}"
+                }
+            })
+        
+        # 构建请求载荷（OpenAI格式）
         payload = {
-            "prompt": str(prompt),
-            "size": size,
-            "n": n,
-            "inputImages": input_images  # 添加输入图片数据
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": content_list
+                }
+            ]
         }
         
         # 如果需要seed控制（API支持的话）
@@ -827,35 +847,34 @@ class GoogleImagenGenerate:
                     data = response.json()
                     print(f"[DEBUG] 响应数据结构: {list(data.keys())}")
                     
-                    # 解析生成的图片
+                    # 解析OpenAI格式的响应
                     generated_images = []
+                    response_text = ""
                     
-                    if "images" in data:
-                        print(f"[DEBUG] 找到 {len(data['images'])} 张图片")
+                    if "choices" in data and data["choices"]:
+                        choice = data["choices"][0]
+                        message = choice.get("message", {})
                         
-                        for i, img_info in enumerate(data["images"]):
-                            try:
-                                if "imageBytes" in img_info:
-                                    # 解码 base64 图片数据
-                                    image_data = base64.b64decode(img_info["imageBytes"])
-                                    pil_img = Image.open(BytesIO(image_data))
-                                    generated_images.append(pil_img)
-                                    print(f"[DEBUG] 成功解析图片 {i+1}: {pil_img.size}")
-                                else:
-                                    print(f"[DEBUG] 图片 {i+1} 缺少 imageBytes 字段")
-                            except Exception as img_e:
-                                print(f"[DEBUG] 解析图片 {i+1} 失败: {img_e}")
-                    else:
-                        print(f"[DEBUG] 响应中没有找到 'images' 字段")
-                        print(f"[DEBUG] 完整响应: {data}")
+                        # 获取文本响应
+                        if "content" in message:
+                            response_text = message["content"]
+                            print(f"[DEBUG] 模型响应文本: {response_text[:200]}...")
+                        
+                        # 检查是否有reasoning_content
+                        if "reasoning_content" in message and message["reasoning_content"]:
+                            print(f"[DEBUG] 找到推理内容: {message['reasoning_content'][:100]}...")
+                        
+                        # 注意：OpenAI聊天API通常不直接返回图片，主要是文本响应
+                        # 如果这是图片编辑API，可能需要不同的端点和响应格式
+                        print(f"[INFO] 这是文本响应API，主要返回分析结果而不是生成图片")
+                        
+                        # 返回分析结果，使用原图片
+                        return image1, f"📝 图片分析完成: {response_text}", True, 1
                     
-                    if generated_images:
-                        # 转换为 ComfyUI 格式
-                        out_tensor = _pil_list_to_comfy_images(generated_images)
-                        info_text = f"✅ 成功生成 {len(generated_images)} 张图片 (模型: {model}, 尺寸: {size})"
-                        return out_tensor, info_text, True, len(generated_images)
                     else:
-                        return image1, "[Google Imagen Node] API 返回成功但未找到图片数据", False, 0
+                        print(f"[DEBUG] 响应中没有找到 'choices' 字段")
+                        print(f"[DEBUG] 完整响应: {data}")
+                        return image1, "[Google Imagen Node] API 返回格式异常", False, 0
                 
                 else:
                     error_data = response.text
