@@ -150,8 +150,8 @@ class GeminiGenerate:
                 "image1": ("IMAGE", {}),  # 必填
                 "seed": ("INT", {
                     "default": 0,
-                    "min": 0,  # 64位有符号整数最小值
-                    "max": 0xffffffffffffffff,   # 64位有符号整数最大值
+                    "min": 0,
+                    "max": 2147483647,  # INT32 最大值，与API兼容
                     "step": 1
                 }),
             },
@@ -393,7 +393,7 @@ class OpenAIGeminiGenerate:
     - 支持多张图片输入：第1张必选，第2、3张可选
     - 图片自动转换为 base64 编码
     - 从环境变量获取 API Key
-    - 必需设置 seed 值（最小值为0）
+    - 必需设置 seed 值（范围：0 到 2147483647，INT32 格式）
     - 必需指定 model_name（默认：gemini-2.5-flash-image-preview）
     - 支持 reasoning_content 输出（思考过程和最终答案分离）
     
@@ -419,9 +419,9 @@ class OpenAIGeminiGenerate:
                 "seed": ("INT", {
                     "default": 0,
                     "min": 0,
-                    "max": 0xffffffffffffffff,
+                    "max": 2147483647,  # INT32 最大值
                     "step": 1,
-                    "tooltip": "随机种子，最小值为0"
+                    "tooltip": "随机种子，最小值为0，最大值为2147483647 (INT32范围)"
                 }),
                 "model_name": ("STRING", {
                     "default": "gemini-2.5-flash-image-preview"
@@ -469,7 +469,9 @@ class OpenAIGeminiGenerate:
     def generate(self, prompt, image1, seed, model_name, api_key_env="DEEPSEEK_API_KEY", 
                  base_url="https://www.chataiapi.com/v1", image2=None, image3=None, max_retries=2):
         
-        # seed 现在是必需参数，直接使用传入的值
+        # 验证 seed 值范围（API 要求 INT32 范围）
+        if seed < 0 or seed > 2147483647:
+            return image1, "", f"[OpenAI Gemini Node] Seed 值必须在 0 到 2147483647 范围内，当前值: {seed}", False
         
         try:
             # 处理第一张图片（必选）
