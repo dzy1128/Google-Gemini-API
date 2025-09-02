@@ -668,20 +668,34 @@ class OpenAIGeminiGenerate:
 
 class GoogleImagenGenerate:
     """
-    ComfyUI Custom Node: Google Gemini 图片生成节点
+    ComfyUI Custom Node: Google Gemini 图片编辑生成节点
     
     功能:
-    - 使用 Google 原生 API 调用 Gemini 模型生成图片
-    - 支持从文本提示词生成高质量图片
+    - 使用 Google 原生 API 调用 Gemini 模型进行图片编辑和生成
+    - 支持多张图片输入：第1张必选，第2-5张可选
+    - 支持基于输入图片进行编辑、风格转换、内容修改
     - 从环境变量获取 Google API Key
     - 支持多种图片尺寸和数量配置
     - 支持 seed 控制生成的随机性
     
+    图片编辑能力:
+    - 风格转换：将输入图片转换为不同艺术风格
+    - 内容编辑：修改图片中的物体、背景、颜色等
+    - 图片融合：结合多张输入图片创造新内容
+    - 图片增强：提升图片质量、分辨率等
+    
     支持的模型:
-    - gemini-2.5-flash-image-preview: Gemini 2.5 图片预览模型（默认）
+    - gemini-2.5-flash-image-preview: Gemini 2.5 图片预览编辑模型（默认）
     - imagen-3.0: Google Imagen 3.0 图片生成模型
-    - 支持高质量图片生成
+    - 支持高质量图片生成和编辑
     - 支持中文提示词
+    
+    输入图片:
+    - image1: 第一张图片（必选）- 主要编辑目标
+    - image2: 第二张图片（可选）- 参考或融合素材
+    - image3: 第三张图片（可选）- 参考或融合素材
+    - image4: 第四张图片（可选）- 参考或融合素材
+    - image5: 第五张图片（可选）- 参考或融合素材
     
     依赖:
     - pip install requests Pillow numpy torch
@@ -694,8 +708,9 @@ class GoogleImagenGenerate:
             "required": {
                 "prompt": ("STRING", {
                     "multiline": True,
-                    "default": "一只戴着太空头盔的橘猫，漂浮在宇宙中，4K超清画质，数字艺术风格"
+                    "default": "将这张图片转换为油画风格，保持主要内容不变，增强艺术感和色彩表现力"
                 }),
+                "image1": ("IMAGE", {}),  # 第一张图片必选
                 "model": (["gemini-2.5-flash-image-preview", "imagen-3.0"], {
                     "default": "gemini-2.5-flash-image-preview"
                 }),
@@ -711,6 +726,10 @@ class GoogleImagenGenerate:
                 }),
             },
             "optional": {
+                "image2": ("IMAGE", {}),  # 第二张图片可选
+                "image3": ("IMAGE", {}),  # 第三张图片可选
+                "image4": ("IMAGE", {}),  # 第四张图片可选
+                "image5": ("IMAGE", {}),  # 第五张图片可选
                 "seed": ("INT", {
                     "default": -1,
                     "min": -1,
@@ -733,7 +752,8 @@ class GoogleImagenGenerate:
     CATEGORY = "Google/GenAI"
     OUTPUT_NODE = False
 
-    def generate(self, prompt, model="imagen-3.0", size="1024x1024", n=1, seed=-1, max_retries=2):
+    def generate(self, prompt, image1, model="gemini-2.5-flash-image-preview", size="1024x1024", n=1, 
+                 image2=None, image3=None, image4=None, image5=None, seed=-1, max_retries=2):
         
         # 处理随机种子
         if seed == -1:
@@ -742,8 +762,28 @@ class GoogleImagenGenerate:
         # 获取 API Key
         api_key = os.getenv("GOOGLE_API_KEY", "").strip()
         if not api_key:
-            dummy_image = torch.zeros(1, 512, 512, 3)
-            return dummy_image, "[Google Imagen Node] GOOGLE_API_KEY 环境变量未设置", False, 0
+            return image1, "[Google Imagen Node] GOOGLE_API_KEY 环境变量未设置", False, 0
+        
+        # 处理输入图片
+        input_images = []
+        try:
+            # 处理第一张图片（必选）
+            pil_img1 = _comfy_image_to_pil(image1)
+            base64_img1 = _pil_to_base64(pil_img1)
+            input_images.append(base64_img1)
+            
+            # 处理其他图片（可选）
+            for i, img in enumerate([image2, image3, image4, image5], 2):
+                if img is not None:
+                    pil_img = _comfy_image_to_pil(img)
+                    base64_img = _pil_to_base64(pil_img)
+                    input_images.append(base64_img)
+                    print(f"[DEBUG] 添加第{i}张输入图片")
+            
+            print(f"[DEBUG] 总共处理了 {len(input_images)} 张输入图片")
+            
+        except Exception as e:
+            return image1, f"[Google Imagen Node] 图片处理失败: {e}", False, 0
         
         # 构建 API URL
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateImages"
@@ -758,7 +798,8 @@ class GoogleImagenGenerate:
         payload = {
             "prompt": str(prompt),
             "size": size,
-            "n": n
+            "n": n,
+            "inputImages": input_images  # 添加输入图片数据
         }
         
         # 如果需要seed控制（API支持的话）
@@ -814,8 +855,7 @@ class GoogleImagenGenerate:
                         info_text = f"✅ 成功生成 {len(generated_images)} 张图片 (模型: {model}, 尺寸: {size})"
                         return out_tensor, info_text, True, len(generated_images)
                     else:
-                        dummy_image = torch.zeros(1, 512, 512, 3)
-                        return dummy_image, "[Google Imagen Node] API 返回成功但未找到图片数据", False, 0
+                        return image1, "[Google Imagen Node] API 返回成功但未找到图片数据", False, 0
                 
                 else:
                     error_data = response.text
@@ -847,7 +887,6 @@ class GoogleImagenGenerate:
                 time.sleep(wait_time)
         
         # 最终失败处理
-        dummy_image = torch.zeros(1, 512, 512, 3)
         error_str = str(last_error) if last_error else "未知错误"
         
         if "401" in error_str or "authentication" in error_str.lower():
@@ -857,9 +896,9 @@ class GoogleImagenGenerate:
         elif "timeout" in error_str.lower():
             error_msg = "[Google Imagen Node] 请求超时，请稍后重试"
         else:
-            error_msg = f"[Google Imagen Node] 生成失败: {error_str}"
+            error_msg = f"[Google Imagen Node] 图片编辑失败: {error_str}"
         
-        return dummy_image, error_msg, False, 0
+        return image1, error_msg, False, 0
 
 
 NODE_CLASS_MAPPINGS = {
