@@ -786,8 +786,8 @@ class GoogleImagenGenerate:
             return image1, f"[Google Imagen Node] 图片处理失败: {e}", False, 0
         
         # 构建 API URL
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateImages"
-        
+        #url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateImages"
+        url = f"https://www.chataiapi.com/v1"
         # 设置请求头
         headers = {
             "Authorization": f"Bearer {api_key}",
