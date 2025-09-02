@@ -386,16 +386,21 @@ class GeminiGenerate:
 
 class OpenAIGeminiGenerate:
     """
-    ComfyUI Custom Node: OpenAI 兼容格式的 Gemini 生成节点（多图片支持）
+    ComfyUI Custom Node: OpenAI 兼容格式的 Gemini 视觉理解节点（多图片支持）
     
     功能:
-    - 通过 OpenAI 兼容的 API 接口调用 Gemini 模型
+    - 通过 OpenAI 兼容的 API 接口调用 Gemini 视觉模型
     - 支持多张图片输入：第1张必选，第2、3张可选
     - 图片自动转换为 base64 编码
     - 从环境变量获取 API Key
     - 必需设置 seed 值（范围：0 到 2147483647，INT32 格式）
-    - 必需指定 model_name（默认：gemini-2.5-flash-image-preview）
+    - 默认使用 gemini-2.5-flash-image-preview（视觉理解模型）
     - 支持 reasoning_content 输出（思考过程和最终答案分离）
+    
+    注意:
+    - gemini-2.5-flash-image-preview 是视觉理解模型，不生成新图片
+    - 主要用于分析和理解输入的图片内容
+    - 如需图片生成，请使用支持图片生成的模型（如 dall-e-3）
     
     输入:
     - image1: 第一张图片（必选）
@@ -413,7 +418,7 @@ class OpenAIGeminiGenerate:
             "required": {
                 "prompt": ("STRING", {
                     "multiline": True,
-                    "default": "请分析这些图片的内容，并生成一张相关的新图片。"
+                    "default": "请详细分析这些图片的内容，包括：1. 图片中的主要物体和场景 2. 颜色、风格和构图特点 3. 可能的用途或背景信息。"
                 }),
                 "image1": ("IMAGE", {}),  # 第一张图片必选
                 "seed": ("INT", {
@@ -559,8 +564,32 @@ class OpenAIGeminiGenerate:
                 generated_images = []
                 image_generated = False
                 
-                # TODO: 根据实际 API 响应格式处理图片数据
-                # 目前假设只返回文本，如果 API 支持图片生成，需要相应处理
+                # 检查模型是否支持图片生成
+                is_image_generation_model = any(keyword in model_name.lower() for keyword in [
+                    'dall-e', 'dalle', 'midjourney', 'stable-diffusion', 'image-gen'
+                ])
+                
+                if is_image_generation_model:
+                    # 对于图片生成模型，检查响应中的图片数据
+                    if hasattr(response, 'data') and response.data:
+                        print(f"[DEBUG] Found {len(response.data)} images in response")
+                        for i, item in enumerate(response.data):
+                            try:
+                                if hasattr(item, 'b64_json') and item.b64_json:
+                                    img_data = base64.b64decode(item.b64_json)
+                                    pil_img = Image.open(BytesIO(img_data))
+                                    generated_images.append(pil_img)
+                                elif hasattr(item, 'url') and item.url:
+                                    print(f"[DEBUG] Image URL: {item.url}")
+                                    # 可以添加下载URL图片的逻辑
+                            except Exception as img_e:
+                                print(f"[DEBUG] Failed to process image {i}: {img_e}")
+                    
+                    image_generated = len(generated_images) > 0
+                else:
+                    # 对于视觉理解模型（如 Gemini），不期望生成图片
+                    print(f"[INFO] 模型 {model_name} 是视觉理解模型，不生成新图片")
+                    image_generated = False
                 
                 if generated_images:
                     out_tensor = _pil_list_to_comfy_images(generated_images)
