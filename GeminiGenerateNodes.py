@@ -203,7 +203,7 @@ class GeminiEditImage:
             raise RuntimeError("openai SDK not installed. Please run: pip install openai")
         
         # 从环境变量获取API密钥
-        api_key = os.getenv("GOOGLE_API_KEY", "").strip()
+        api_key = os.getenv("GOOGLE_API_KEY_TB", "").strip()
         if not api_key:
             raise RuntimeError("GOOGLE_API_KEY environment variable is required but not set")
         
