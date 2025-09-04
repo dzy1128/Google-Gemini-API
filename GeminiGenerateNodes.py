@@ -436,7 +436,7 @@ class GeminiGenerate:
     def _get_client(self):
         if genai is None:
             raise RuntimeError("google-genai SDK not installed. Please run: pip install google-genai")
-        key = os.getenv("GOOGLE_API_KEY", "").strip()
+        key = os.getenv("GOOGLE_API_KEY_OFFICIAL", "").strip()
         if not key:
             raise RuntimeError("GOOGLE_API_KEY environment variable is required but not set")
         # 按照官方示例使用默认客户端创建方式
